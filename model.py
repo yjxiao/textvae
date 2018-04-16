@@ -48,16 +48,18 @@ class Decoder(nn.Module):
         self.rnn = nn.LSTM(input_size, hidden_size, num_layers=1, batch_first=True)
         self.fcz = nn.Linear(code_size, hidden_size)
         
-    def forward(self, inputs, lengths, z, init_hidden=None):
+    def forward(self, inputs, z, lengths=None, init_hidden=None):
         inputs = self.drop(inputs)
-        inputs = pack_padded_sequence(inputs, lengths, batch_first=True)
+        if lengths is not None:
+            inputs = pack_padded_sequence(inputs, lengths, batch_first=True)
         if init_hidden is None:
             init_hidden = self.fcz(z)
             init_c = Variable(init_hidden.data.new(init_hidden.size()).zero_())
             outputs, hidden = self.rnn(inputs, (init_hidden, init_c))
         else:
             outputs, hidden = self.rnn(inputs, init_hidden)
-        outputs, _ = pad_packed_sequence(outputs)
+        if lengths is not None:
+            outputs, _ = pad_packed_sequence(outputs)
         outputs = self.drop(outputs)
         return outputs, hidden
 
@@ -88,14 +90,15 @@ class TextVAE(nn.Module):
     def sample(self, inputs, lengths, max_length, sos_id, eos_id):
         enc_emb = self.lookup(inputs)
         mu, logvar = self.encoder(enc_emb, lengths)
+        # z size: 1 x batch_size x code_size
         z = self.reparameterize(mu, logvar)
-        batch_size = z.size(0)
+        batch_size = z.size(1)
         dec_inputs = Variable(z.data.new(batch_size, 1).long().fill_(sos_id), volatile=True)
         init_hidden = None
         generated = dec_inputs.data.new(batch_size, max_length)
         for k in range(max_length):
             dec_emb = self.lookup(dec_inputs)
-            outputs, hidden = self.decoder(dec_emb, lengths, z, init_hidden)
+            outputs, hidden = self.decoder(dec_emb, z, init_hidden=init_hidden)
             outputs = self.fcout(outputs)
             dec_inputs = outputs.max(2)[1]
             generated[:, k] = dec_inputs.data[:, 0].clone()
