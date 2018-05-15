@@ -73,7 +73,7 @@ class TextVAE(nn.Module):
 
     def reparameterize(self, mu, logvar):
         std = logvar.mul(0.5).exp_()
-        eps = std.data.new(std.size()).normal_()
+        eps = std.new(std.size()).normal_()
         return eps.mul(std).add_(mu)
 
     def forward(self, inputs, lengths):
@@ -90,23 +90,25 @@ class TextVAE(nn.Module):
         bow = self.bow_predictor(z)
         return outputs, mu, logvar, bow
 
-    def reconstruct(self, inputs, lengths, max_length, sos_id, eos_id):
+    def reconstruct(self, inputs, lengths, max_length, sos_id):
         enc_emb = self.lookup(inputs)
         hn = self.encoder(enc_emb, lengths)
         mu, logvar = self.fcmu(hn), self.fclogvar(hn)
         # z size: 1 x batch_size x code_size
         z = self.reparameterize(mu, logvar)
+        return self.generate(z, max_length, sos_id)
+
+    def generate(self, z, max_length, sos_id):
         batch_size = z.size(1)
-        generated = inputs.data.new(batch_size, max_length)
-        dec_inputs = inputs.data.new(batch_size, 1).fill_(sos_id)
-        init_hidden = None
+        generated = torch.zeros((batch_size, max_length), dtype=torch.long, device=z.device)
+        dec_inputs = torch.full((batch_size, 1), sos_id, dtype=torch.long, device=z.device)
+        hidden = None
         for k in range(max_length):
             dec_emb = self.lookup(dec_inputs)
-            outputs, hidden = self.decoder(dec_emb, z, init_hidden=init_hidden)
+            outputs, hidden = self.decoder(dec_emb, z, init_hidden=hidden)
             outputs = self.fcout(outputs)
             dec_inputs = outputs.max(2)[1]
-            generated[:, k] = dec_inputs.data[:, 0].clone()
-            init_hidden = hidden
+            generated[:, k] = dec_inputs[:, 0].clone()
         return generated
 
 
@@ -114,7 +116,7 @@ class BoWPredictor(nn.Module):
     def __init__(self, vocab_size, hidden_size, code_size):
         super(BoWPredictor, self).__init__()
         self.fc1 = nn.Linear(code_size, hidden_size)
-        self.activation = nn.Tanh()
+        self.activation = nn.ReLU()
         self.fc2 = nn.Linear(hidden_size, vocab_size)
 
     def forward(self, inputs):

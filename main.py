@@ -35,14 +35,16 @@ parser.add_argument('--lr', type=float, default=1e-3,
                     help="learning rate")
 parser.add_argument('--wd', type=float, default=0,
                     help="weight decay used for regularization")
+parser.add_argument('--epoch_size', type=int, default=2000,
+                    help="number of training steps in an epoch")
 parser.add_argument('--seed', type=int, default=42,
                     help="random seed")
+parser.add_argument('--kla', action='store_true',
+                    help="use kl annealing")
 parser.add_argument('--bow', action='store_true',
                     help="add bag of words loss in training")
 parser.add_argument('--nocuda', action='store_true',
                     help="do not use CUDA")
-parser.add_argument('--save', type=str,  default='./saves/model.pt',
-                    help="path to save the final model")
 args = parser.parse_args()
 
 torch.manual_seed(args.seed)
@@ -57,9 +59,9 @@ def loss_function(targets, outputs, mu, logvar, bow=None):
     kld = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
     # bow: from batch_size x vocab_size to batch_size * sequence_length x vocab_size
     if bow is None:
-        bow_loss = None
+        bow_loss = torch.tensor(0., device=outputs.device)
     else:
-        bow = bow.unsqueeze(1).expand(-1, outputs.size(1), -1).contiguous()
+        bow = bow.unsqueeze(1).repeat(1, outputs.size(1), 1).contiguous()
         bow_loss = F.cross_entropy(bow.view(bow.size(0) * bow.size(1),
                                             bow.size(2)),
                                    targets.view(-1),
@@ -68,7 +70,16 @@ def loss_function(targets, outputs, mu, logvar, bow=None):
     return ce_loss, kld, bow_loss
 
 
-def evaluate(data_source, model):
+def get_loss(texts, lengths, model, device):
+    inputs = texts[:, :-1].clone().to(device)
+    targets = texts[:, 1:].clone().to(device)
+    outputs, mu, logvar, bow = model(inputs, lengths)
+    if not args.bow:
+        bow = None
+    return loss_function(targets, outputs, mu, logvar, bow)
+
+
+def evaluate(data_source, model, device):
     model.eval()
     total_ce = 0.0
     total_kld = 0.0
@@ -76,107 +87,107 @@ def evaluate(data_source, model):
     total_words = 0
     for i in range(0, data_source.size, args.batch_size):
         batch_size = min(data_source.size-i, args.batch_size)
-        inputs, targets, lengths = data_source.get_batch(i, batch_size)
-        inputs = inputs.to(device)
-        targets = targets.to(device)
-        outputs, mu, logvar, bow = model(inputs, lengths)
-        if not args.bow:
-            bow = None
-        ce, kld, bow_loss = loss_function(targets, outputs, mu, logvar, bow)
+        texts, lengths, _ = data_source.get_batch(batch_size, i)
+        ce, kld, bow_loss = get_loss(texts, lengths, model, device)
         total_ce += ce.item()
         total_kld += kld.item()
-        if args.bow:
-            total_bow += bow_loss.item()
+        total_bow += bow_loss.item()
         total_words += sum(lengths)
     ppl = math.exp(total_ce / total_words)
     return (total_ce / data_source.size, total_kld / data_source.size,
             total_bow / data_source.size, ppl)
 
 
-def train(data_source, model, optimizer, epoch):
+def train(data_source, model, optimizer, epoch, device):
     model.train()
     total_ce = 0.0
     total_kld = 0.0
     total_bow = 0.0
     total_words = 0
-    for i in range(0, data_source.size, args.batch_size):
-        batch_size = min(data_source.size-i, args.batch_size)
-        inputs, targets, lengths = data_source.get_batch(i, batch_size)
-        inputs = inputs.to(device)
-        targets = targets.to(device)
-        outputs, mu, logvar, bow = model(inputs, lengths)
-        if not args.bow:
-            bow = None
-        ce, kld, bow_loss = loss_function(targets, outputs, mu, logvar, bow)
+    for i in range(args.epoch_size):
+        texts, lengths, _ = data_source.get_batch(args.batch_size)
+        ce, kld, bow_loss = get_loss(texts, lengths, model, device)
         total_ce += ce.item()
         total_kld += kld.item()
-        if args.bow:
-            total_bow += bow_loss.item()
+        total_bow += bow_loss.item()
         total_words += sum(lengths)
-        kld_weight = weight_schedule(data_source.size, args.batch_size, epoch, i)
+        kld_weight = weight_schedule(args.epoch_size * (epoch - 1) + i) if args.kla else 1.
         optimizer.zero_grad()
-        if args.bow:
-            loss = ce + kld_weight * kld + bow_loss
-        else:
-            loss = ce + kld_weight * kld
+        loss = ce + kld_weight * kld + bow_loss
         loss.backward()
         optimizer.step()
+    ppl = math.exp(total_ce / total_words)
     return (total_ce / data_source.size, total_kld / data_source.size,
-            total_bow / data_source.size, kld_weight)
+            total_bow / data_source.size, ppl, kld_weight)
 
 
-def interpolate(i, k, n):
-    return max(min((i - k) / n, 1), 0)
+def interpolate(i, start, duration):
+    return max(min((i - start) / duration, 1), 0)
 
 
-def weight_schedule(data_size, batch_size, epoch, i):
+def weight_schedule(t):
     """Scheduling of the KLD annealing weight. """
-    #return interpolate((data_size // batch_size) * (epoch - 1) + i // batch_size, 3000, 15000)
-    return 1.
+    return interpolate(t, 2000, 40000)
 
 
-print("Loading data")
-corpus = data.Corpus(args.data, max_vocab_size=args.max_vocab,
-                     max_length=args.max_length)
-vocab_size = len(corpus.word2idx)
-print("\ttraining data size: ", corpus.train_data.size)
-print("\tvocabulary size: ", vocab_size)
-print("Constructing model")
-print(args)
-device = torch.device('cpu' if args.nocuda else 'cuda')
-model = TextVAE(vocab_size, args.embed_size, args.hidden_size, args.code_size,
-                args.dropout, args.dropword).to(device)
-optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.wd)
-best_loss = None
+def get_savepath(args):
+    dataset = args.data.rstrip('/').split('/')[-1]
+    path = './saves/emb{0:d}.hid{1:d}{2}{3}{4}.{5}.pt'.format(
+        args.embed_size, args.hidden_size,
+        '.wd{:.0e}'.format(args.wd) if args.wd > 0 else '',
+        '.kla' if args.kla else '', '.bow' if args.bow else '', dataset)
+    return path
 
-print("\nStart training")
-try:
-    for epoch in range(1, args.epochs+1):
-        epoch_start_time = time.time()
-        train_ce, train_kld, train_bow, kld_weight = train(corpus.train_data, model, optimizer, epoch)
-        valid_ce, valid_kld, valid_bow, ppl = evaluate(corpus.valid_data, model)
-        print('-' * 120)
-        print("| epoch {:3d} | time {:4.2f}s | train loss {:4.4f} ({:4.4f}) "
-              "| train bow loss {:4.4f} | valid loss {:4.4f} ({:4.4f}) "
-              "| valid bow loss {:4.4f} | kld weight {:4.4f} | ppl {:2.2f}".format(
-                  epoch, time.time()-epoch_start_time, train_ce,
-                  train_kld, train_bow, valid_ce, valid_kld, valid_bow,
-                  kld_weight, ppl), flush=True)
+
+def main(args):
+    print("Loading data")
+    corpus = data.Corpus(args.data, max_vocab_size=args.max_vocab,
+                         max_length=args.max_length)
+    vocab_size = len(corpus.word2idx)
+    print("\ttraining data size: ", corpus.train_data.size)
+    print("\tvocabulary size: ", vocab_size)
+    print("Constructing model")
+    print(args)
+    device = torch.device('cpu' if args.nocuda else 'cuda')
+    model = TextVAE(vocab_size, args.embed_size, args.hidden_size, args.code_size,
+                    args.dropout, args.dropword).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.wd)
+    best_loss = None
+
+    print("\nStart training")
+    try:
+        for epoch in range(1, args.epochs+1):
+            epoch_start_time = time.time()
+            train_ce, train_kld, train_bow, train_ppl, _ = train(corpus.train_data, model, optimizer, epoch, device)
+            valid_ce, valid_kld, valid_bow, valid_ppl = evaluate(corpus.valid_data, model, device)
+        print('-' * 90)
+        meta = "| epoch {:2d} | time {:5.2f}s ".format(epoch, time.time()-epoch_start_time)
+        print(meta + "| train loss {:5.2f} ({:5.2f}) "
+              "| train ppl {:5.2f} | bow loss {:5.2f}".format(
+            train_ce, train_kld, train_ppl, train_bow))
+        print(meta.length * ' ' + "| valid loss {:5.2f} ({:5.2f}) "
+              "| valid ppl {:5.2f} | bow loss {:5.2f}".format(
+                  valid_ce, valid_kld, valid_ppl, valid_bow), flush=True)
         if best_loss is None or valid_ce + valid_kld < best_loss:
             best_loss = valid_ce + valid_kld
-            with open(args.save, 'wb') as f:
+            with open(get_savepath(args), 'wb') as f:
                 torch.save(model, f)
                 
-except KeyboardInterrupt:
-    print('-' * 120)
-    print('Exiting from training early')
+    except KeyboardInterrupt:
+        print('-' * 90)
+        print('Exiting from training early')
 
 
-with open(args.save, 'rb') as f:
-    model = torch.load(f)
+    with open(get_savepath(args), 'rb') as f:
+        model = torch.load(f)
 
-test_ce, test_kld, test_bow, test_ppl = evaluate(corpus.test_data, model)
-print('=' * 120)
-print("| End of training | test loss {:4.4f} ({:4.4f}) | test bow loss {:4.4f} | test ppl {:2.2f}".format(
-    test_ce, test_kld, test_bow, test_ppl))
-print('=' * 120)
+    test_ce, test_kld, test_bow, test_ppl = evaluate(corpus.test_data, model)
+    print('=' * 90)
+    print("| End of training | test loss {:5.2f} ({:5.2f}) "
+          "| test ppl {:5.2f} | bow loss {:5.2f}".format(
+              test_ce, test_kld, test_ppl, test_bow))
+    print('=' * 90)
+
+
+if __name__ == '__main__':
+    main(args)
