@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.autograd import Variable
+from torch.distributions.relaxed_categorical import RelaxedOneHotCategorical
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 
 from data import UNK_ID
@@ -14,7 +14,7 @@ class DropWord(nn.Module):
         self.unk_id = unk_id
 
     def forward(self, inputs):
-        if not self.training:
+        if not self.training or self.dropout == 0:
             return inputs
         else:
             dropmask = Variable(torch.bernoulli(
@@ -27,18 +27,16 @@ class DropWord(nn.Module):
 
 
 class Encoder(nn.Module):
-    def __init__(self, input_size, hidden_size, code_size, dropout):
+    def __init__(self, input_size, hidden_size, dropout):
         super(Encoder, self).__init__()
         self.drop = nn.Dropout(dropout)
         self.rnn = nn.LSTM(input_size, hidden_size, num_layers=1, batch_first=True)
-        self.fcmu = nn.Linear(hidden_size, code_size)
-        self.fclogvar = nn.Linear(hidden_size, code_size)
 
     def forward(self, inputs, lengths):
         inputs = self.drop(inputs)
         inputs = pack_padded_sequence(inputs, lengths, batch_first=True)
         _, (hn, _) = self.rnn(inputs)
-        return self.fcmu(hn), self.fclogvar(hn)
+        return hn
 
 
 class Decoder(nn.Module):
@@ -46,20 +44,17 @@ class Decoder(nn.Module):
         super(Decoder, self).__init__()
         self.drop = nn.Dropout(dropout)
         self.rnn = nn.LSTM(input_size, hidden_size, num_layers=1, batch_first=True)
-        self.fcz = nn.Linear(code_size, hidden_size)
+        self.fcz = nn.Linear(code_size, hidden_size * 2)
         
     def forward(self, inputs, z, lengths=None, init_hidden=None):
         inputs = self.drop(inputs)
         if lengths is not None:
             inputs = pack_padded_sequence(inputs, lengths, batch_first=True)
         if init_hidden is None:
-            init_hidden = self.fcz(z)
-            init_c = Variable(init_hidden.data.new(init_hidden.size()).zero_())
-            outputs, hidden = self.rnn(inputs, (init_hidden, init_c))
-        else:
-            outputs, hidden = self.rnn(inputs, init_hidden)
+            init_hidden = [x.contiguous() for x in torch.chunk(F.tanh(self.fcz(z)), 2, 2)]
+        outputs, hidden = self.rnn(inputs, init_hidden)
         if lengths is not None:
-            outputs, _ = pad_packed_sequence(outputs)
+            outputs, _ = pad_packed_sequence(outputs, batch_first=True)
         outputs = self.drop(outputs)
         return outputs, hidden
 
@@ -69,33 +64,42 @@ class TextVAE(nn.Module):
         super(TextVAE, self).__init__()
         self.dropword = DropWord(dropword, UNK_ID)
         self.lookup = nn.Embedding(vocab_size, embed_size)
-        self.encoder = Encoder(embed_size, hidden_size, code_size, dropout)
+        self.encoder = Encoder(embed_size, hidden_size, dropout)
         self.decoder = Decoder(embed_size, hidden_size, code_size, dropout)
+        self.fcmu = nn.Linear(hidden_size, code_size)
+        self.fclogvar = nn.Linear(hidden_size, code_size)
         self.fcout = nn.Linear(hidden_size, vocab_size)
+        self.bow_predictor = BoWPredictor(vocab_size, hidden_size, code_size)
 
     def reparameterize(self, mu, logvar):
         std = logvar.mul(0.5).exp_()
-        eps = Variable(std.data.new(std.size()).normal_())
+        eps = std.data.new(std.size()).normal_()
         return eps.mul(std).add_(mu)
 
     def forward(self, inputs, lengths):
         enc_emb = self.lookup(inputs)
         dec_emb = self.lookup(self.dropword(inputs))
-        mu, logvar = self.encoder(enc_emb, lengths)
-        z = self.reparameterize(mu, logvar)
-        outputs, _ = self.decoder(dec_emb, lengths, z)
+        hn = self.encoder(enc_emb, lengths)
+        mu, logvar = self.fcmu(hn), self.fclogvar(hn)
+        if self.training:
+            z = self.reparameterize(mu, logvar)
+        else:
+            z = mu
+        outputs, _ = self.decoder(dec_emb, z, lengths=lengths)
         outputs = self.fcout(outputs)
-        return outputs, mu, logvar
+        bow = self.bow_predictor(z)
+        return outputs, mu, logvar, bow
 
-    def sample(self, inputs, lengths, max_length, sos_id, eos_id):
+    def reconstruct(self, inputs, lengths, max_length, sos_id, eos_id):
         enc_emb = self.lookup(inputs)
-        mu, logvar = self.encoder(enc_emb, lengths)
+        hn = self.encoder(enc_emb, lengths)
+        mu, logvar = self.fcmu(hn), self.fclogvar(hn)
         # z size: 1 x batch_size x code_size
         z = self.reparameterize(mu, logvar)
         batch_size = z.size(1)
-        dec_inputs = Variable(z.data.new(batch_size, 1).long().fill_(sos_id), volatile=True)
+        generated = inputs.data.new(batch_size, max_length)
+        dec_inputs = inputs.data.new(batch_size, 1).fill_(sos_id)
         init_hidden = None
-        generated = dec_inputs.data.new(batch_size, max_length)
         for k in range(max_length):
             dec_emb = self.lookup(dec_inputs)
             outputs, hidden = self.decoder(dec_emb, z, init_hidden=init_hidden)
@@ -104,3 +108,70 @@ class TextVAE(nn.Module):
             generated[:, k] = dec_inputs.data[:, 0].clone()
             init_hidden = hidden
         return generated
+
+
+class BoWPredictor(nn.Module):
+    def __init__(self, vocab_size, hidden_size, code_size):
+        super(BoWPredictor, self).__init__()
+        self.fc1 = nn.Linear(code_size, hidden_size)
+        self.activation = nn.Tanh()
+        self.fc2 = nn.Linear(hidden_size, vocab_size)
+
+    def forward(self, inputs):
+        """Inputs: latent code """
+        logits = self.fc2(self.activation(self.fc1(inputs))).squeeze(0)
+        return logits
+
+
+class Classifier(nn.Module):
+    def __init__(self, input_size, hidden_size, num_classes):
+        super(Classifier, self).__init__()
+        self.fc1 = nn.Linear(input_size, hidden_size)
+        self.activation = nn.ReLU()
+        self.fc2 = nn.Linear(hidden_size, num_classes)
+
+    def forward(self, inputs):
+        if inputs.dim() == 3:
+            inputs = inputs.squeeze(0)
+        return F.log_softmax(self.fc2(self.activation(self.fc1(inputs))), dim=1)
+
+
+class SSTextVAE(nn.Module):
+    def __init__(self, vocab_size, num_classes, embed_size, y_embed_size, hidden_size, code_size, dropout):
+        super(SSTextVAE, self).__init__()
+        self.lookup = nn.Embedding(vocab_size, embed_size)
+        self.y_lookup = nn.Embedding(num_classes, y_embed_size)
+        self.encoder = Encoder(embed_size, hidden_size, dropout)
+        self.decoder = Decoder(embed_size, hidden_size, code_size + y_embed_size, dropout)
+        self.fcmu = nn.Linear(hidden_size + y_embed_size, code_size)
+        self.fclogvar = nn.Linear(hidden_size + y_embed_size, code_size)
+        self.fcout = nn.Linear(hidden_size, vocab_size)
+        self.bow_predictor = BoWPredictor(vocab_size, hidden_size, code_size + y_embed_size)
+        self.classifier = Classifier(hidden_size, hidden_size, num_classes)
+        
+    def reparameterize(self, mu, logvar):
+        std = logvar.mul(0.5).exp_()
+        eps = std.data.new(std.size()).normal_()
+        return eps.mul(std).add_(mu)
+
+    def forward(self, inputs, lengths, temp=None, y=None):
+        enc_emb = self.lookup(inputs)
+        dec_emb = self.lookup(inputs)
+        hn = self.encoder(enc_emb, lengths)
+        py = self.classifier(hn)
+        if y is None:
+            dist = RelaxedOneHotCategorical(temp, logits=py)
+            y = dist.sample().max(1)[1]
+        y_emb = self.y_lookup(y)
+        h = torch.cat([hn, y_emb.unsqueeze(0)], dim=2)
+        mu, logvar = self.fcmu(h), self.fclogvar(h)
+        if self.training:
+            z = self.reparameterize(mu, logvar)
+        else:
+            z = mu
+        code = torch.cat([z, y_emb.unsqueeze(0)], dim=2)
+        outputs, _ = self.decoder(dec_emb, code, lengths=lengths)
+        outputs = self.fcout(outputs)
+        bow = self.bow_predictor(code)
+        return outputs, mu, logvar, bow, py
+

@@ -7,15 +7,15 @@ import data
 from data import SOS_ID, EOS_ID
 
 parser = argparse.ArgumentParser(description='Text VAE translate')
-parser.add_argument('--data', type=str, default='./data',
+parser.add_argument('--data', type=str, default='./data/filtered_ami',
                     help='location of the corpus (same as training)')
 parser.add_argument('--checkpoint', type=str, default='./saves/model.pt',
                     help='location of the model file')
-parser.add_argument('--input_file', type=str, default='./data/valid.txt',
+parser.add_argument('--input_file', type=str, default='./data/pos_samples.txt',
                     help='location of the input texts')
-parser.add_argument('--output_file', type=str, default='./data/valid.txt.out',
+parser.add_argument('--output_file', type=str, default='./data/pos_samples.txt.out',
                     help='output file to write reconstructed texts')
-parser.add_argument('--max_length', type=int, default=25,
+parser.add_argument('--max_length', type=int, default=36,
                     help='maximum generation length')
 parser.add_argument('--batch_size', type=int, default=64,
                     help='batch size used in generation')
@@ -70,7 +70,7 @@ vocab_size = len(corpus.word2idx)
 print("\ttraining data size: ", corpus.train_data.size)
 print("\tvocabulary size: ", vocab_size)
 # data to be reconstructed
-input_data = data.Data([args.input_file], corpus.word2idx)
+input_data = data.Data(args.input_file, corpus.word2idx)
 results = predict(input_data, model, corpus.idx2word)
 with open(args.output_file, 'w') as f:
     f.write('\n'.join(results))
