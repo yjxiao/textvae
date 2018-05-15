@@ -1,6 +1,7 @@
 *.log
+*.pyc
+*.sh
 data/*
 saves/*
-*pyc
 *~
 __pycache__/*
