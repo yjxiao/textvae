@@ -160,18 +160,18 @@ def main(args):
             epoch_start_time = time.time()
             train_ce, train_kld, train_bow, train_ppl, _ = train(corpus.train_data, model, optimizer, epoch, device)
             valid_ce, valid_kld, valid_bow, valid_ppl = evaluate(corpus.valid_data, model, device)
-        print('-' * 90)
-        meta = "| epoch {:2d} | time {:5.2f}s ".format(epoch, time.time()-epoch_start_time)
-        print(meta + "| train loss {:5.2f} ({:5.2f}) "
-              "| train ppl {:5.2f} | bow loss {:5.2f}".format(
-            train_ce, train_kld, train_ppl, train_bow))
-        print(meta.length * ' ' + "| valid loss {:5.2f} ({:5.2f}) "
-              "| valid ppl {:5.2f} | bow loss {:5.2f}".format(
-                  valid_ce, valid_kld, valid_ppl, valid_bow), flush=True)
-        if best_loss is None or valid_ce + valid_kld < best_loss:
-            best_loss = valid_ce + valid_kld
-            with open(get_savepath(args), 'wb') as f:
-                torch.save(model, f)
+            print('-' * 90)
+            meta = "| epoch {:2d} | time {:5.2f}s ".format(epoch, time.time()-epoch_start_time)
+            print(meta + "| train loss {:5.2f} ({:4.2f}) "
+                  "| train ppl {:5.2f} | bow loss {:5.2f}".format(
+                      train_ce, train_kld, train_ppl, train_bow))
+            print(len(meta) * ' ' + "| valid loss {:5.2f} ({:4.2f}) "
+                  "| valid ppl {:5.2f} | bow loss {:5.2f}".format(
+                      valid_ce, valid_kld, valid_ppl, valid_bow), flush=True)
+            if best_loss is None or valid_ce + valid_kld < best_loss:
+                best_loss = valid_ce + valid_kld
+                with open(get_savepath(args), 'wb') as f:
+                    torch.save(model, f)
                 
     except KeyboardInterrupt:
         print('-' * 90)
@@ -180,7 +180,6 @@ def main(args):
 
     with open(get_savepath(args), 'rb') as f:
         model = torch.load(f)
-
     test_ce, test_kld, test_bow, test_ppl = evaluate(corpus.test_data, model)
     print('=' * 90)
     print("| End of training | test loss {:5.2f} ({:5.2f}) "
