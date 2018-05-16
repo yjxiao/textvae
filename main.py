@@ -180,7 +180,7 @@ def main(args):
 
     with open(get_savepath(args), 'rb') as f:
         model = torch.load(f)
-    test_ce, test_kld, test_bow, test_ppl = evaluate(corpus.test_data, model)
+    test_ce, test_kld, test_bow, test_ppl = evaluate(corpus.test_data, model, device)
     print('=' * 90)
     print("| End of training | test loss {:5.2f} ({:5.2f}) "
           "| test ppl {:5.2f} | bow loss {:5.2f}".format(
