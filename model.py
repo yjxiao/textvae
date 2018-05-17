@@ -9,7 +9,7 @@ from data import UNK_ID
 
 class DropWord(nn.Module):
     def __init__(self, dropout, unk_id):
-        super(DropWord, self).__init__()
+        super().__init__()
         self.dropout = dropout
         self.unk_id = unk_id
 
@@ -17,10 +17,8 @@ class DropWord(nn.Module):
         if not self.training or self.dropout == 0:
             return inputs
         else:
-            dropmask = Variable(torch.bernoulli(
-                inputs.data.new(inputs.size()).float().fill_(self.dropout)).byte(),
-                                requires_grad=False)
-
+            dropmask = torch.bernoulli(
+                torch.full(inputs.size(), self.dropout, dtype=torch.float())).byte()
             inputs = inputs.clone()
             inputs[dropmask] = self.unk_id
             return inputs
@@ -28,7 +26,7 @@ class DropWord(nn.Module):
 
 class Encoder(nn.Module):
     def __init__(self, input_size, hidden_size, dropout):
-        super(Encoder, self).__init__()
+        super().__init__()
         self.drop = nn.Dropout(dropout)
         self.rnn = nn.LSTM(input_size, hidden_size, num_layers=1, batch_first=True)
 
@@ -41,7 +39,7 @@ class Encoder(nn.Module):
 
 class Decoder(nn.Module):
     def __init__(self, input_size, hidden_size, code_size, dropout):
-        super(Decoder, self).__init__()
+        super().__init__()
         self.drop = nn.Dropout(dropout)
         self.rnn = nn.LSTM(input_size, hidden_size, num_layers=1, batch_first=True)
         self.fcz = nn.Linear(code_size, hidden_size * 2)
@@ -61,7 +59,7 @@ class Decoder(nn.Module):
 
 class TextVAE(nn.Module):
     def __init__(self, vocab_size, embed_size, hidden_size, code_size, dropout, dropword):
-        super(TextVAE, self).__init__()
+        super().__init__()
         self.dropword = DropWord(dropword, UNK_ID)
         self.lookup = nn.Embedding(vocab_size, embed_size)
         self.encoder = Encoder(embed_size, hidden_size, dropout)
@@ -69,7 +67,7 @@ class TextVAE(nn.Module):
         self.fcmu = nn.Linear(hidden_size, code_size)
         self.fclogvar = nn.Linear(hidden_size, code_size)
         self.fcout = nn.Linear(hidden_size, vocab_size)
-        self.bow_predictor = BoWPredictor(vocab_size, hidden_size, code_size)
+        self.bow_predictor = BowPredictor(code_size, hidden_size, vocab_size)
 
     def reparameterize(self, mu, logvar):
         std = logvar.mul(0.5).exp_()
@@ -112,19 +110,106 @@ class TextVAE(nn.Module):
         return generated
 
 
-class BoWPredictor(nn.Module):
-    def __init__(self, vocab_size, hidden_size, code_size):
-        super(BoWPredictor, self).__init__()
-        self.fc1 = nn.Linear(code_size, hidden_size)
-        self.activation = nn.ReLU()
-        self.fc2 = nn.Linear(hidden_size, vocab_size)
+class MLP(nn.Module):
+    def __init__(self, input_size, hidden_size, output_size):
+        super().__init__()
+        self.fc1 = nn.Linear(input_size, hidden_size)
+        self.act = nn.ReLU()
+        self.fc2 = nn.Linear(hidden_size, output_size)
+
+    def forward(self, inputs):
+        return self.fc2(self.act(self.fc1(inputs)))
+
+
+class BowPredictor(MLP):
+    def __init__(self, code_size, hidden_size, vocab_size):
+        super().__init__(code_size, hidden_size, vocab_size)
 
     def forward(self, inputs):
         """Inputs: latent code """
-        logits = self.fc2(self.activation(self.fc1(inputs))).squeeze(0)
-        return logits
+        return super().forward(inputs).squeeze(0)
 
 
+class ZPrior(MLP):
+    def __init__(self, input_size, hidden_size, code_size):
+        super().__init__(input_size, hidden_size, code_size * 2)
+
+    def forward(self, inputs):
+        if inputs.dim() == 2:
+            inputs.unsqueeze_(0)
+        return torch.chunk(super().forward(inputs), chunks=2, dim=2)
+
+
+class TextCVAE(nn.Module):
+    def __init__(self, vocab_size, num_classes, embed_size, label_embed_size,
+                 hidden_size, code_size, dropout, dropword):
+        super().__init__()
+        self.dropword = DropWord(dropword, UNK_ID)
+        self.lookup = nn.Embedding(vocab_size, embed_size)
+        self.label_lookup = nn.Embedding(num_classes, label_embed_size)
+        self.encoder = Encoder(embed_size, hidden_size, dropout)
+        self.decoder = Decoder(embed_size, hidden_size,
+                               code_size + label_embed_size, dropout)
+        self.fcmu = nn.Linear(hidden_size + label_embed_size, code_size)
+        self.fclogvar = nn.Linear(hidden_size + label_embed_size, code_size)
+        self.z_prior = ZPrior(label_embed_size, hidden_size, code_size)
+        self.fcout = nn.Linear(hidden_size, vocab_size)
+        self.bow_predictor = BowPredictor(code_size, hidden_size, vocab_size)
+
+    def reparameterize(self, mu, logvar):
+        std = logvar.mul(0.5).exp_()
+        eps = std.new(std.size()).normal_()
+        return eps.mul(std).add_(mu)
+
+    def forward(self, inputs, labels, lengths):
+        enc_emb = self.lookup(inputs)
+        dec_emb = self.lookup(self.dropword(inputs))
+        lab_emb = self.label_lookup(labels).unsqueeze(0)
+        mu_pr, logvar_pr = self.z_prior(lab_emb)
+        hn = self.encoder(enc_emb, lengths)
+        hn = torch.cat([hn, lab_emb], dim=2)
+        mu_po, logvar_po = self.fcmu(hn), self.fclogvar(hn)
+        if self.training:
+            z = self.reparameterize(mu_po, logvar_po)
+        else:
+            z = mu
+        code = torch.cat([z, lab_emb], dim=2)
+        outputs, _ = self.decoder(dec_emb, code, lengths=lengths)
+        outputs = self.fcout(outputs)
+        bow = self.bow_predictor(code)
+        return outputs, (mu_pr, mu_po), (logvar_pr, logvar_po), bow
+
+    def reconstruct(self, inputs, labels, lengths, max_length, sos_id):
+        enc_emb = self.lookup(inputs)
+        lab_emb = self.label_lookup(labels).unsqueeze(0)
+        hn = self.encoder(enc_emb, lengths)
+        hn = torch.cat([hn, lab_emb], dim=2)
+        mu, logvar = self.fcmu(hn), self.fclogvar(hn)
+        # z size: 1 x batch_size x code_size
+        z = self.reparameterize(mu, logvar)
+        return self.generate(z, lab_emb, max_length, sos_id)
+
+    def sample(self, labels, max_length, sos_id):
+        lab_emb = self.label_lookup(labels).unsqueeze(0)
+        mu, logvar = self.z_prior(lab_emb)
+        z = self.reparameterize(mu, logvar)
+        return self.generate(z, lab_emb, max_length, sos_id)
+    
+    def generate(self, z, lab_emb, max_length, sos_id):
+        batch_size = z.size(1)
+        generated = torch.zeros((batch_size, max_length), dtype=torch.long, device=z.device)
+        dec_inputs = torch.full((batch_size, 1), sos_id, dtype=torch.long, device=z.device)
+        code = torch.cat([z, lab_emb], dim=2)
+        hidden = None
+        for k in range(max_length):
+            dec_emb = self.lookup(dec_inputs)
+            outputs, hidden = self.decoder(dec_emb, code, init_hidden=hidden)
+            outputs = self.fcout(outputs)
+            dec_inputs = outputs.max(2)[1]
+            generated[:, k] = dec_inputs[:, 0].clone()
+        return generated
+
+    
 class LM(nn.Module):
     def __init__(self, vocab_size, embed_size, hidden_size, dropout):
         super().__init__()
