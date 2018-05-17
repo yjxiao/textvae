@@ -125,6 +125,25 @@ class BoWPredictor(nn.Module):
         return logits
 
 
+class LM(nn.Module):
+    def __init__(self, vocab_size, embed_size, hidden_size, dropout):
+        super().__init__()
+        self.lookup = nn.Embedding(vocab_size, embed_size)
+        self.drop = nn.Dropout(dropout)
+        self.rnn = nn.LSTM(embed_size, hidden_size, num_layers=1, batch_first=True)
+        self.fcout = nn.Linear(hidden_size, vocab_size)
+
+    def forward(self, inputs, lengths):
+        dec_emb = self.drop(self.lookup(inputs))
+        if lengths is not None:
+            dec_emb = pack_padded_sequence(dec_emb, lengths, batch_first=True)
+        outputs, hidden = self.rnn(dec_emb)
+        if lengths is not None:
+            outputs, _ = pad_packed_sequence(outputs, batch_first=True)
+        outputs = self.fcout(self.drop(outputs))
+        return outputs
+
+
 class Classifier(nn.Module):
     def __init__(self, input_size, hidden_size, num_classes):
         super(Classifier, self).__init__()
