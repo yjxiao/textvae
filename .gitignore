@@ -1,6 +1,7 @@
 *.log
 *.pyc
 *.sh
+*.pt
 data/*
 saves/*
 *~
