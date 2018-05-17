@@ -3,9 +3,8 @@ import time
 import math
 import torch
 import torch.nn.functional as F
-from torch.autograd import Variable
 
-from model import TextVAE
+from model import TextVAE, TextCVAE
 import data
 from data import PAD_ID
 
@@ -19,6 +18,8 @@ parser.add_argument('--max_length', type=int, default=200,
                     help="maximum sequence length for the input")
 parser.add_argument('--embed_size', type=int, default=200,
                     help="size of the word embedding")
+parser.add_argument('--label_embed_size', type=int, default=8,
+                    help="size of the label embedding")
 parser.add_argument('--hidden_size', type=int, default=512,
                     help="number of hidden units for RNN")
 parser.add_argument('--code_size', type=int, default=32,
@@ -56,7 +57,11 @@ def loss_function(targets, outputs, mu, logvar, bow=None):
                               targets.view(-1),
                               size_average=False,
                               ignore_index=PAD_ID)
-    kld = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+    if type(mu) == torch.Tensor:
+        kld = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+    else:
+        kld = - 0.5 * torch.sum(1 + logvar[1] - logvar[0] -
+                                ((mu[1] - mu[0]).pow(2) + logvar[1].exp()) / logvar[0].exp())
     # bow: from batch_size x vocab_size to batch_size * sequence_length x vocab_size
     if bow is None:
         bow_loss = torch.tensor(0., device=outputs.device)
@@ -70,10 +75,14 @@ def loss_function(targets, outputs, mu, logvar, bow=None):
     return ce_loss, kld, bow_loss
 
 
-def get_loss(texts, lengths, model, device):
+def get_loss(texts, labels, lengths, model, device):
     inputs = texts[:, :-1].clone().to(device)
     targets = texts[:, 1:].clone().to(device)
-    outputs, mu, logvar, bow = model(inputs, lengths)
+    if labels is None:
+        outputs, mu, logvar, bow = model(inputs, lengths)
+    else:
+        labels = labels.to(device)
+        outputs, mu, logvar, bow = model(inputs, labels, lengths)
     if not args.bow:
         bow = None
     return loss_function(targets, outputs, mu, logvar, bow)
@@ -87,8 +96,8 @@ def evaluate(data_source, model, device):
     total_words = 0
     for i in range(0, data_source.size, args.batch_size):
         batch_size = min(data_source.size-i, args.batch_size)
-        texts, lengths, _ = data_source.get_batch(batch_size, i)
-        ce, kld, bow_loss = get_loss(texts, lengths, model, device)
+        texts, labels, lengths, _ = data_source.get_batch(batch_size, i)
+        ce, kld, bow_loss = get_loss(texts, labels, lengths, model, device)
         total_ce += ce.item()
         total_kld += kld.item()
         total_bow += bow_loss.item()
@@ -105,8 +114,8 @@ def train(data_source, model, optimizer, epoch, device):
     total_bow = 0.0
     total_words = 0
     for i in range(args.epoch_size):
-        texts, lengths, _ = data_source.get_batch(args.batch_size)
-        ce, kld, bow_loss = get_loss(texts, lengths, model, device)
+        texts, labels, lengths, _ = data_source.get_batch(args.batch_size)
+        ce, kld, bow_loss = get_loss(texts, labels, lengths, model, device)
         total_ce += ce.item()
         total_kld += kld.item()
         total_bow += bow_loss.item()
@@ -141,16 +150,26 @@ def get_savepath(args):
 
 def main(args):
     print("Loading data")
+    dataset = args.data.rstrip('/').split('/')[-1]
+    if dataset in ['yahoo', 'yelp']:
+        with_label = True
+    else:
+        with_label = False
     corpus = data.Corpus(args.data, max_vocab_size=args.max_vocab,
-                         max_length=args.max_length)
+                         max_length=args.max_length, with_label=with_label)
     vocab_size = len(corpus.word2idx)
-    print("\ttraining data size: ", corpus.train_data.size)
+    print("\ttraining data size: ", corpus.train.size)
     print("\tvocabulary size: ", vocab_size)
     print("Constructing model")
     print(args)
     device = torch.device('cpu' if args.nocuda else 'cuda')
-    model = TextVAE(vocab_size, args.embed_size, args.hidden_size, args.code_size,
-                    args.dropout, args.dropword).to(device)
+    if with_label:
+        model = TextCVAE(vocab_size, corpus.num_classes, args.embed_size,
+                         args.label_embed_size, args.hidden_size, args.code_size,
+                         args.dropout, args.dropword).to(device)
+    else:
+        model = TextVAE(vocab_size, args.embed_size, args.hidden_size, args.code_size,
+                        args.dropout, args.dropword).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.wd)
     best_loss = None
 
@@ -158,8 +177,8 @@ def main(args):
     try:
         for epoch in range(1, args.epochs+1):
             epoch_start_time = time.time()
-            train_ce, train_kld, train_bow, train_ppl, _ = train(corpus.train_data, model, optimizer, epoch, device)
-            valid_ce, valid_kld, valid_bow, valid_ppl = evaluate(corpus.valid_data, model, device)
+            train_ce, train_kld, train_bow, train_ppl, _ = train(corpus.train, model, optimizer, epoch, device)
+            valid_ce, valid_kld, valid_bow, valid_ppl = evaluate(corpus.valid, model, device)
             print('-' * 90)
             meta = "| epoch {:2d} | time {:5.2f}s ".format(epoch, time.time()-epoch_start_time)
             print(meta + "| train loss {:5.2f} ({:4.2f}) "
@@ -180,7 +199,7 @@ def main(args):
 
     with open(get_savepath(args), 'rb') as f:
         model = torch.load(f)
-    test_ce, test_kld, test_bow, test_ppl = evaluate(corpus.test_data, model, device)
+    test_ce, test_kld, test_bow, test_ppl = evaluate(corpus.test, model, device)
     print('=' * 90)
     print("| End of training | test loss {:5.2f} ({:5.2f}) "
           "| test ppl {:5.2f} | bow loss {:5.2f}".format(

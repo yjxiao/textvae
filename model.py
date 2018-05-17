@@ -96,6 +96,11 @@ class TextVAE(nn.Module):
         z = self.reparameterize(mu, logvar)
         return self.generate(z, max_length, sos_id)
 
+    def sample(self, num_samples, max_length, sos_id, device):
+        z_size = self.fcmu.out_features
+        z = torch.randn(1, num_samples, z_size, device=device)
+        return self.generate(z, max_length, sos_id)
+    
     def generate(self, z, max_length, sos_id):
         batch_size = z.size(1)
         generated = torch.zeros((batch_size, max_length), dtype=torch.long, device=z.device)
@@ -154,7 +159,8 @@ class TextCVAE(nn.Module):
         self.fclogvar = nn.Linear(hidden_size + label_embed_size, code_size)
         self.z_prior = ZPrior(label_embed_size, hidden_size, code_size)
         self.fcout = nn.Linear(hidden_size, vocab_size)
-        self.bow_predictor = BowPredictor(code_size, hidden_size, vocab_size)
+        self.bow_predictor = BowPredictor(code_size + label_embed_size,
+                                          hidden_size, vocab_size)
 
     def reparameterize(self, mu, logvar):
         std = logvar.mul(0.5).exp_()
