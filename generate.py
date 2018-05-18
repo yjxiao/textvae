@@ -12,8 +12,8 @@ parser.add_argument('--data', type=str, default='./data/books',
 parser.add_argument('--ckpt', type=str, default='./saves/model.pt',
                     help='location of the model file')
 parser.add_argument('--task', type=str, default='sample',
-                    help='task to perform')
-parser.add_argument('--input_file', type=str, default='valid.txt',
+                    help='task to perform [sample, reconstruct]')
+parser.add_argument('--input_file', type=str, default='train.txt',
                     help='location of the input texts')
 parser.add_argument('--output_file', type=str, default='outputs.txt',
                     help='output file to write reconstructed texts')
@@ -61,18 +61,21 @@ def sample(data_source, model, label, idx2word, device):
                 prefix = ''
             results.append(prefix + indices_to_sentence(sample, idx2word))
     return results
-                                                                                        
-def predict(data_source, model, idx2word):
+
+
+def reconstruct(data_source, model, idx2word, device):
     results = []
     for i in range(0, data_source.size, args.batch_size):
         batch_size = min(data_source.size-i, args.batch_size)
-        inputs, _, lengths = data_source.get_batch(i, batch_size)
-        if args.cuda:
-            inputs = inputs.cuda()
-        inputs = Variable(inputs, volatile=True)
-        samples = model.sample(inputs, lengths, args.max_length, SOS_ID, EOS_ID)
-        for sample in samples.cpu().numpy():
-            results.append(translate_sentence(sample, idx2word))
+        texts, labels, lengths, idx = data_source.get_batch(batch_size, i)
+        inputs = texts[:, :-1].clone().to(device)
+        if data_source.has_label:
+            labels = labels.to(device)
+            samples = model.reconstruct(inputs, labels, lengths, args.max_length, SOS_ID)
+        else:
+            samples = model.reconstruct(inputs, lengths, args.max_length, SOS_ID)
+        for sample in samples.cpu().numpy()[idx]:
+            results.append(indices_to_sentence(sample, idx2word))
     return results
 
 
@@ -103,6 +106,12 @@ def main(args):
         else:
             results = sample(input_data, model, None, corpus.idx2word, device)
             with open('{0}.samp'.format(output_path), 'w') as f:
+                f.write('\n'.join(results))
+
+    elif args.task == 'reconstruct':
+        for i in range(args.num_samples):
+            results = reconstruct(input_data, model, corpus.idx2word, device)
+            with open('{0}.{1:d}.rec'.format(output_path, i), 'w') as f:
                 f.write('\n'.join(results))
 
 
