@@ -178,7 +178,7 @@ class TextCVAE(nn.Module):
         if self.training:
             z = self.reparameterize(mu_po, logvar_po)
         else:
-            z = mu
+            z = mu_po
         code = torch.cat([z, lab_emb], dim=2)
         outputs, _ = self.decoder(dec_emb, code, lengths=lengths)
         outputs = self.fcout(outputs)
