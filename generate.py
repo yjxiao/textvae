@@ -1,5 +1,6 @@
 import argparse
 import os
+import numpy as np
 import torch
 from torch.autograd import Variable
 
@@ -11,9 +12,9 @@ parser.add_argument('--data', type=str, default='./data/books',
                     help='location of the corpus (same as training)')
 parser.add_argument('--ckpt', type=str, default='./saves/model.pt',
                     help='location of the model file')
-parser.add_argument('--task', type=str, default='sample',
-                    help='task to perform [sample, reconstruct]')
-parser.add_argument('--input_file', type=str, default='train.txt',
+parser.add_argument('--task', type=str, default='get_code',
+                    help='task to perform [sample, reconstruct, get_code]')
+parser.add_argument('--input_file', type=str, default='test.txt',
                     help='location of the input texts')
 parser.add_argument('--output_file', type=str, default='outputs.txt',
                     help='output file to write reconstructed texts')
@@ -79,6 +80,20 @@ def reconstruct(data_source, model, idx2word, device):
     return results
 
 
+def get_z(data_source, model, device):
+    mus, var = [], []
+    for i in range(0, data_source.size, args.batch_size):
+        batch_size = min(data_source.size-i, args.batch_size)
+        texts, _, lengths, idx = data_source.get_batch(batch_size, i)
+        inputs = texts[:, :-1].clone().to(device)
+        _, mu, logvar, _ = model.forward(inputs, lengths)
+        for x in mu.squeeze(0).cpu().detach().numpy()[idx]:
+            mus.append(' '.join(list(map(str, x))))
+        for x in logvar.squeeze(0).cpu().detach().numpy()[idx]:            
+            var.append(' '.join(list(map(str, np.exp(x)))))
+    return mus, var
+
+
 def main(args):
     with open(args.ckpt, 'rb') as f:
         model = torch.load(f)
@@ -114,6 +129,13 @@ def main(args):
             with open('{0}.{1:d}.rec'.format(output_path, i), 'w') as f:
                 f.write('\n'.join(results))
 
+    elif args.task == 'get_code':
+        mus, var = get_z(input_data, model, device)
+        with open('{0}.mu'.format(output_path), 'w') as f:
+            f.write('\n'.join(mus))
+        with open('{0}.var'.format(output_path), 'w') as f:
+            f.write('\n'.join(var))
 
+            
 if __name__ == '__main__':
     main(args)

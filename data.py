@@ -78,12 +78,12 @@ class Data(object):
         else:
             batch_idx = np.arange(start_id, start_id + batch_size)
         batch_texts = self.texts[batch_idx]
-        batch_labels = self.labels[batch_idx]
+        batch_labels = self.labels[batch_idx] if self.has_label else None
         lengths = np.array([len(x) - 1 for x in batch_texts])    # actual length is 1 less
         # sort by length in order to use packed sequence
         idx = np.argsort(lengths)[::-1]
         batch_texts = batch_texts[idx]
-        batch_labels = batch_labels[idx]
+        batch_labels = batch_labels[idx] if self.has_label else None
         lengths = list(lengths[idx])
         max_len = int(lengths[0] + 1)
         text_tensor = torch.full((batch_size, max_len), PAD_ID, dtype=torch.long)

@@ -126,8 +126,9 @@ def train(data_source, model, optimizer, epoch, device):
         loss.backward()
         optimizer.step()
     ppl = math.exp(total_ce / total_words)
-    return (total_ce / data_source.size, total_kld / data_source.size,
-            total_bow / data_source.size, ppl, kld_weight)
+    num_samples = args.epoch_size * args.batch_size
+    return (total_ce / num_samples, total_kld / num_samples,
+            total_bow / num_samples, ppl, kld_weight)
 
 
 def interpolate(i, start, duration):
