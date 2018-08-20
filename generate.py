@@ -50,7 +50,7 @@ def sample(data_source, model, label, idx2word, device):
         batch_size = min(args.num_samples - i, args.batch_size)
         if data_source.has_label:
             labels = torch.full((batch_size,), label, dtype=torch.long, device=device)
-            samples = model.sample(labels, args.max_length, SOS_ID)
+            samples = model.sample(labels, args.max_length, SOS_ID, scale=3)
         else:
             samples = model.sample(batch_size, args.max_length, SOS_ID, device)
         for i, sample in enumerate(samples.cpu().numpy()):

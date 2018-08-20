@@ -195,10 +195,12 @@ class TextCVAE(nn.Module):
         z = self.reparameterize(mu, logvar)
         return self.generate(z, lab_emb, max_length, sos_id)
 
-    def sample(self, labels, max_length, sos_id):
+    def sample(self, labels, max_length, sos_id, scale=1):
         lab_emb = self.label_lookup(labels).unsqueeze(0)
         mu, logvar = self.z_prior(lab_emb)
         z = self.reparameterize(mu, logvar)
+        if scale != 1:
+            z = mu + (z - mu) * scale
         return self.generate(z, lab_emb, max_length, sos_id)
     
     def generate(self, z, lab_emb, max_length, sos_id):
